@@ -3,8 +3,7 @@
 Adverse Drug Reaction (ADR) Severity Classification
 Decision Tree + Logistic Regression | Healthcare ML Project
 =============================================================================
-Inspired by: https://medium.com/thedeephub/data-science-project-build-a-
-             decision-tree-model-with-healthcare-data-fe93d2d6c70c
+
 
 Dataset: Synthetically generated to mirror FDA FAERS structure
 Target:  Multi-class ADR severity
@@ -15,6 +14,7 @@ Target:  Multi-class ADR severity
 =============================================================================
 """
 
+import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -29,6 +29,16 @@ from sklearn.metrics import (classification_report, confusion_matrix,
 from sklearn.pipeline import Pipeline
 import warnings
 warnings.filterwarnings("ignore")
+
+# Import real FAERS data fetcher
+try:
+    from fetch_faers_data import fetch_real_faers_data
+    HAS_FAERS_FETCHER = True
+except ImportError:
+    HAS_FAERS_FETCHER = False
+
+# Create outputs directory if it doesn't exist
+os.makedirs("outputs", exist_ok=True)
 
 # ── Reproducibility ────────────────────────────────────────────────────────
 np.random.seed(42)
@@ -51,9 +61,10 @@ PALETTE = ["#4e8cff", "#ff6b6b", "#ffd166", "#06d6a0"]
 SEVERITY_LABELS = ["No Reaction", "Hospitalization", "Life-Threatening/Disabling", "Death"]
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 1. SYNTHETIC DATA GENERATION  (mirrors FDA FAERS schema)
+# 1. DATA LOADING  (Real FAERS data with synthetic fallback)
 # ═══════════════════════════════════════════════════════════════════════════
-def generate_faers_data(n: int = 5000) -> pd.DataFrame:
+def generate_faers_data(n=5000):
+    """Generate synthetic FAERS data (fallback if real data unavailable)"""
     age_bins   = ["0-20", "21-40", "41-60", "61-80", "80+"]
     age_probs  = [0.06, 0.18, 0.32, 0.30, 0.14]
     genders    = ["Female", "Male"]
@@ -107,12 +118,39 @@ def generate_faers_data(n: int = 5000) -> pd.DataFrame:
     })
     return df
 
+def load_data(use_real_faers=True):
+    """Load real FAERS data or fallback to synthetic"""
+    data_source = "synthetic"
+    
+    if use_real_faers and HAS_FAERS_FETCHER:
+        print("  Attempting to fetch real FAERS data from FDA OpenAPI...")
+        df = fetch_real_faers_data(num_records=1000)
+        if df is not None and not df.empty:
+            # Check if we have meaningful class distribution
+            severity_counts = df["severity"].value_counts()
+            if len(severity_counts) >= 2:  # At least 2 classes
+                print(f"  ✓ Real FAERS data loaded with {len(severity_counts)} severity classes")
+                data_source = "real FAERS"
+                return df, data_source
+            else:
+                print(f"  ⚠ Real data has limited class diversity ({len(severity_counts)} class). Augmenting with synthetic...")
+                # Augment real data with synthetic to ensure class balance
+                synthetic_df = generate_faers_data(min(5000, max(len(df) * 5, 2000)))
+                df = pd.concat([df, synthetic_df], ignore_index=True)
+                data_source = "real FAERS (augmented)"
+                return df, data_source
+        print("  Real data unavailable. Falling back to synthetic data.")
+    
+    df = generate_faers_data(5000)
+    return df, data_source
+
 print("=" * 65)
 print("  ADR Severity Classification  |  Healthcare ML Project")
 print("=" * 65)
 
-df = generate_faers_data(5000)
-print(f"\n[1] Dataset generated  →  {df.shape[0]:,} records, {df.shape[1]} features")
+df, data_source = load_data(use_real_faers=True)
+data_type_label = "real FAERS" if data_source == "real FAERS" else "synthetic"
+print(f"\n[1] Dataset loaded ({data_type_label})  →  {df.shape[0]:,} records, {df.shape[1]} features")
 print(df.head())
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -153,13 +191,17 @@ best_dt  = dt_gs.best_estimator_
 y_pred_dt = best_dt.predict(X_test)
 dt_train_acc = best_dt.score(X_train, y_train)
 dt_test_acc  = accuracy_score(y_test, y_pred_dt)
-dt_f1        = f1_score(y_test, y_pred_dt, average="macro")
+dt_f1        = f1_score(y_test, y_pred_dt, average="macro", zero_division=0)
 
 print(f"    Best params : {dt_gs.best_params_}")
 print(f"    Train acc   : {dt_train_acc:.3f}   Test acc : {dt_test_acc:.3f}")
 print(f"    Macro F1    : {dt_f1:.3f}")
 print("\n    Classification Report (Decision Tree):")
-print(classification_report(y_test, y_pred_dt, target_names=SEVERITY_LABELS))
+
+# Get only the labels that exist in test set
+unique_classes = sorted(np.unique(np.concatenate([y_test, y_pred_dt])))
+active_labels = [SEVERITY_LABELS[i] for i in unique_classes]
+print(classification_report(y_test, y_pred_dt, target_names=active_labels, labels=unique_classes))
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 4. LOGISTIC REGRESSION  (baseline comparison)
@@ -174,16 +216,25 @@ lr_pipe.fit(X_train, y_train)
 y_pred_lr = lr_pipe.predict(X_test)
 lr_train_acc = lr_pipe.score(X_train, y_train)
 lr_test_acc  = accuracy_score(y_test, y_pred_lr)
-lr_f1        = f1_score(y_test, y_pred_lr, average="macro")
+lr_f1        = f1_score(y_test, y_pred_lr, average="macro", zero_division=0)
 print(f"    Train acc : {lr_train_acc:.3f}   Test acc : {lr_test_acc:.3f}")
 print(f"    Macro F1  : {lr_f1:.3f}")
 print("\n    Classification Report (Logistic Regression):")
-print(classification_report(y_test, y_pred_lr, target_names=SEVERITY_LABELS))
+
+# Get only the labels that exist in test set
+unique_classes_lr = sorted(np.unique(np.concatenate([y_test, y_pred_lr])))
+active_labels_lr = [SEVERITY_LABELS[i] for i in unique_classes_lr]
+print(classification_report(y_test, y_pred_lr, target_names=active_labels_lr, labels=unique_classes_lr))
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 5.  VISUALISATIONS
 # ═══════════════════════════════════════════════════════════════════════════
 print("\n[5] Generating visualisations …")
+
+# Get actual severity classes present in data
+actual_severity_classes = sorted(df["severity"].unique())
+actual_severity_labels = [SEVERITY_LABELS[i] for i in actual_severity_classes]
+actual_colors = [PALETTE[i] for i in actual_severity_classes]
 
 # ── Fig 1: EDA dashboard ──────────────────────────────────────────────────
 fig1, axes = plt.subplots(2, 3, figsize=(18, 10))
@@ -192,7 +243,7 @@ fig1.suptitle("Adverse Drug Reaction — Exploratory Data Analysis",
 
 # (a) Severity class distribution
 sev_counts = df["severity"].value_counts().sort_index()
-bars = axes[0, 0].bar(SEVERITY_LABELS, sev_counts.values, color=PALETTE, edgecolor="none")
+bars = axes[0, 0].bar(actual_severity_labels, sev_counts.values, color=actual_colors, edgecolor="none")
 axes[0, 0].set_title("Severity Class Distribution", fontsize=12, fontweight="bold")
 axes[0, 0].set_xlabel("Severity Class")
 axes[0, 0].set_ylabel("Count")
@@ -200,25 +251,25 @@ for bar, val in zip(bars, sev_counts.values):
     axes[0, 0].text(bar.get_x() + bar.get_width() / 2,
                     bar.get_height() + 30, f"{val:,}",
                     ha="center", va="bottom", fontsize=9, color="#c0c0c0")
-axes[0, 0].set_xticklabels(SEVERITY_LABELS, rotation=15, ha="right", fontsize=8)
+axes[0, 0].set_xticklabels(actual_severity_labels, rotation=15, ha="right", fontsize=8)
 
 # (b) Age group distribution by severity
 age_order = ["0-20", "21-40", "41-60", "61-80", "80+"]
 age_sev   = df.groupby(["age_group", "severity"]).size().unstack(fill_value=0)
 age_sev   = age_sev.reindex(age_order)
 age_sev.plot(kind="bar", stacked=True, ax=axes[0, 1],
-             color=PALETTE, edgecolor="none", legend=False)
+             color=actual_colors, edgecolor="none", legend=False)
 axes[0, 1].set_title("Age Group × Severity", fontsize=12, fontweight="bold")
 axes[0, 1].set_xlabel("Age Group")
 axes[0, 1].set_ylabel("Count")
 axes[0, 1].set_xticklabels(age_order, rotation=0)
-leg = axes[0, 1].legend(SEVERITY_LABELS, title="Severity",
+leg = axes[0, 1].legend(actual_severity_labels, title="Severity",
                          fontsize=7, title_fontsize=8,
                          loc="upper right", framealpha=0.4)
 
 # (c) Dosage form vs severity heatmap
 dosage_sev = df.groupby(["dosage_form", "severity"]).size().unstack(fill_value=0)
-dosage_sev.columns = [s[:12] for s in SEVERITY_LABELS]
+dosage_sev.columns = [actual_severity_labels[i] for i in range(len(dosage_sev.columns))]
 sns.heatmap(dosage_sev, ax=axes[0, 2], cmap="YlOrRd",
             linewidths=0.5, linecolor="#0f1117",
             annot=True, fmt="d", annot_kws={"size": 8},
@@ -231,7 +282,7 @@ axes[0, 2].tick_params(axis="x", rotation=20)
 # (d) Drug class vs severity
 drug_sev = df.groupby(["drug_class", "severity"]).size().unstack(fill_value=0)
 drug_sev.plot(kind="barh", stacked=True, ax=axes[1, 0],
-              color=PALETTE, edgecolor="none", legend=False)
+              color=actual_colors, edgecolor="none", legend=False)
 axes[1, 0].set_title("Drug Class × Severity", fontsize=12, fontweight="bold")
 axes[1, 0].set_xlabel("Count")
 axes[1, 0].set_ylabel("Drug Class")
@@ -244,7 +295,7 @@ axes[1, 1].set_ylabel("Frequency")
 
 # (f) Gender split
 gender_sev = df.groupby(["gender", "severity"]).size().unstack(fill_value=0)
-gender_sev.plot(kind="bar", ax=axes[1, 2], color=PALETTE,
+gender_sev.plot(kind="bar", ax=axes[1, 2], color=actual_colors,
                 edgecolor="none", legend=False)
 axes[1, 2].set_title("Gender × Severity", fontsize=12, fontweight="bold")
 axes[1, 2].set_xlabel("Gender")
@@ -252,7 +303,7 @@ axes[1, 2].set_ylabel("Count")
 axes[1, 2].set_xticklabels(["Female", "Male"], rotation=0)
 
 plt.tight_layout()
-fig1.savefig("/mnt/user-data/outputs/1_eda_dashboard.png",
+fig1.savefig(os.path.join("outputs", "1_eda_dashboard.png"),
              dpi=150, bbox_inches="tight", facecolor="#0f1117")
 print("    Saved: 1_eda_dashboard.png")
 
@@ -266,17 +317,18 @@ for ax, y_pred, title in zip(
     [y_pred_dt, y_pred_lr],
     ["Decision Tree (GridSearchCV)", "Logistic Regression"]
 ):
-    cm = confusion_matrix(y_test, y_pred)
+    cm = confusion_matrix(y_test, y_pred, labels=actual_severity_classes)
     im = ax.imshow(cm, cmap="Blues")
-    ax.set_xticks(range(4))
-    ax.set_yticks(range(4))
-    ax.set_xticklabels(SEVERITY_LABELS, rotation=20, ha="right", fontsize=8)
-    ax.set_yticklabels(SEVERITY_LABELS, fontsize=8)
+    n_classes = len(actual_severity_classes)
+    ax.set_xticks(range(n_classes))
+    ax.set_yticks(range(n_classes))
+    ax.set_xticklabels(actual_severity_labels, rotation=20, ha="right", fontsize=8)
+    ax.set_yticklabels(actual_severity_labels, fontsize=8)
     ax.set_xlabel("Predicted Label", fontsize=10)
     ax.set_ylabel("True Label", fontsize=10)
     ax.set_title(title, fontsize=11, fontweight="bold")
-    for i in range(4):
-        for j in range(4):
+    for i in range(n_classes):
+        for j in range(n_classes):
             ax.text(j, i, cm[i, j],
                     ha="center", va="center",
                     color="white" if cm[i, j] > cm.max() / 2 else "#333",
@@ -284,7 +336,7 @@ for ax, y_pred, title in zip(
     plt.colorbar(im, ax=ax, shrink=0.8)
 
 plt.tight_layout()
-fig2.savefig("/mnt/user-data/outputs/2_confusion_matrices.png",
+fig2.savefig(os.path.join("outputs", "2_confusion_matrices.png"),
              dpi=150, bbox_inches="tight", facecolor="#0f1117")
 print("    Saved: 2_confusion_matrices.png")
 
@@ -302,7 +354,7 @@ ax3.axvline(importances.mean(), color="#ffd166", linestyle="--",
             linewidth=1, label=f"Mean ({importances.mean():.3f})")
 ax3.legend(fontsize=9)
 plt.tight_layout()
-fig3.savefig("/mnt/user-data/outputs/3_feature_importance.png",
+fig3.savefig(os.path.join("outputs", "3_feature_importance.png"),
              dpi=150, bbox_inches="tight", facecolor="#0f1117")
 print("    Saved: 3_feature_importance.png")
 
@@ -321,7 +373,7 @@ plot_tree(
 )
 ax4.set_title("Decision Tree (depth=3 preview — full tree max_depth=20)",
               fontsize=11, fontweight="bold", color="#e0e0e0", pad=10)
-fig4.savefig("/mnt/user-data/outputs/4_decision_tree_preview.png",
+fig4.savefig(os.path.join("outputs", "4_decision_tree_preview.png"),
              dpi=120, bbox_inches="tight", facecolor="#0f1117")
 print("    Saved: 4_decision_tree_preview.png")
 
@@ -349,10 +401,10 @@ for rect in ax5.patches:
     ax5.text(rect.get_x() + rect.get_width() / 2, rect.get_height() + 0.005,
              f"{rect.get_height():.2f}", ha="center", va="bottom", fontsize=8)
 plt.tight_layout()
-fig5.savefig("/mnt/user-data/outputs/5_model_comparison.png",
+fig5.savefig(os.path.join("outputs", "5_model_comparison.png"),
              dpi=150, bbox_inches="tight", facecolor="#0f1117")
 print("    Saved: 5_model_comparison.png")
 
 print("\n" + "=" * 65)
-print("  All outputs saved to /mnt/user-data/outputs/")
+print("  All outputs saved to outputs/")
 print("=" * 65)
